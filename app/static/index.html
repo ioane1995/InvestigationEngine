@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Investigation Engine</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b2430; --muted:#5d6b7c; --line:#d9dee5; --accent:#0b5fff; --ok:#0a7a3d; --warn:#9a5b00; --bad:#b3261e;
+          --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#12161c; --card:#1a2029; --ink:#e6ebf2; --muted:#9aa7b8; --line:#2c3644; --accent:#6ea2ff; --ok:#4cc38a; --warn:#e0a23a; --bad:#ff7b72; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--ink); }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; padding:14px 20px; background:var(--card); border-bottom:1px solid var(--line); }
+  header h1 { font-size:18px; margin:0; }
+  #stats { color:var(--muted); font-size:13px; }
+  main { max-width:1100px; margin:0 auto; padding:16px; }
+  nav { display:flex; gap:6px; margin-bottom:12px; }
+  nav button { border:1px solid var(--line); background:var(--card); color:var(--ink); padding:7px 14px; border-radius:6px; cursor:pointer; }
+  nav button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px; margin-bottom:12px; }
+  textarea, input, select { width:100%; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); font:inherit; }
+  label { font-size:13px; color:var(--muted); display:block; margin:6px 0 2px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:end; }
+  .row > * { flex:1 1 140px; }
+  button.act { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:9px 16px; cursor:pointer; font:inherit; }
+  button.act:disabled { opacity:.5; cursor:wait; }
+  button.link { background:none; border:0; color:var(--accent); cursor:pointer; padding:0 4px; font:inherit; }
+  button.danger { color:var(--bad); }
+  .badge { display:inline-block; padding:2px 10px; border-radius:99px; font-size:12px; font-weight:600; border:1px solid currentColor; }
+  .answered { color:var(--ok); } .insufficient_evidence { color:var(--warn); } .conflicting_evidence { color:var(--bad); }
+  .chip { display:inline-block; font:12px var(--mono); border:1px solid var(--accent); color:var(--accent); border-radius:5px; padding:0 6px; margin:0 2px; cursor:pointer; background:none; }
+  .claim { margin:6px 0; } .claim.unsupported { color:var(--bad); }
+  .muted { color:var(--muted); font-size:13px; }
+  pre { white-space:pre-wrap; font:12px var(--mono); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px; margin:6px 0; }
+  table { width:100%; border-collapse:collapse; font-size:14px; } th, td { text-align:left; padding:6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  .steps div { font:12px var(--mono); color:var(--muted); }
+  #toast { position:fixed; right:16px; bottom:16px; background:var(--ink); color:var(--bg); padding:10px 14px; border-radius:6px; display:none; max-width:420px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI Investigation Engine</h1>
+  <div id="stats">loading…</div>
+  <div style="min-width:220px"><input id="adminKey" type="password" placeholder="Admin API key (for upload/delete)" autocomplete="off"></div>
+</header>
+<main>
+  <nav>
+    <button data-tab="ask" class="on">Ask</button>
+    <button data-tab="docs">Documents</button>
+    <button data-tab="search">Search debugger</button>
+  </nav>
+
+  <section id="tab-ask">
+    <div class="card">
+      <label for="q">Question</label>
+      <textarea id="q" rows="3" placeholder="e.g. Which change caused the payment processing delays in March 2024, which services were affected and which documents confirm this?"></textarea>
+      <div class="row">
+        <div><label for="o-mode">Retrieval</label><select id="o-mode"><option>hybrid</option><option>dense</option><option>bm25</option></select></div>
+        <div><label for="o-rerank">Re-rank</label><select id="o-rerank"><option value="1">on</option><option value="0">off</option></select></div>
+        <div><label for="o-hops">Hops</label><select id="o-hops"><option>0</option><option selected>1</option><option>2</option></select></div>
+        <div><label for="o-plan">Planner (LLM)</label><select id="o-plan"><option value="1">on</option><option value="0">off</option></select></div>
+        <div style="flex:0 0 auto"><button class="act" id="askBtn">Investigate</button></div>
+      </div>
+    </div>
+    <div id="steps" class="card steps hidden"></div>
+    <div id="result"></div>
+    <div id="source" class="card hidden"></div>
+  </section>
+
+  <section id="tab-docs" class="hidden">
+    <div class="card">
+      <b>Add documents</b> <span class="muted">(txt, md, html, pdf, docx, json, csv). Re-uploading a file with the same name updates it; identical content under another name is rejected as a duplicate.</span>
+      <div class="row">
+        <div><label for="files">Files</label><input id="files" type="file" multiple accept=".txt,.md,.markdown,.html,.htm,.pdf,.docx,.json,.csv"></div>
+        <div><label for="chunking">Chunking</label><select id="chunking"><option value="structure">structure-aware</option><option value="fixed">fixed window</option></select></div>
+        <div style="flex:0 0 auto"><button class="act" id="uploadBtn">Upload</button></div>
+      </div>
+      <details style="margin-top:10px"><summary>Or paste text</summary>
+        <label for="pt-title">Title</label><input id="pt-title"><label for="pt-text">Text</label><textarea id="pt-text" rows="4"></textarea>
+        <p><button class="act" id="pasteBtn">Add text</button></p></details>
+      <div id="upload-out" class="muted"></div>
+    </div>
+    <div class="card">
+      <div class="row"><div><input id="docq" placeholder="filter by title / id / source"></div><div style="flex:0 0 auto"><button class="act" id="docRefresh">Refresh</button></div></div>
+      <table><thead><tr><th>Title</th><th>Format</th><th>Chunks</th><th>Strategy</th><th></th></tr></thead><tbody id="doclist"></tbody></table>
+      <p class="muted" id="docmeta"></p>
+      <p><button class="link" id="prev">‹ prev</button><button class="link" id="next">next ›</button></p>
+    </div>
+    <div id="docview" class="card hidden"></div>
+  </section>
+
+  <section id="tab-search" class="hidden">
+    <div class="card">
+      <label for="sq">Query</label><input id="sq">
+      <div class="row">
+        <div><label for="s-mode">Mode</label><select id="s-mode"><option>hybrid</option><option>dense</option><option>bm25</option></select></div>
+        <div><label for="s-fusion">Fusion</label><select id="s-fusion"><option>rrf</option><option>weighted</option></select></div>
+        <div><label for="s-rerank">Re-rank</label><select id="s-rerank"><option value="1">on</option><option value="0">off</option></select></div>
+        <div style="flex:0 0 auto"><button class="act" id="searchBtn">Search</button></div>
+      </div>
+    </div>
+    <div id="sresult"></div>
+  </section>
+</main>
+<div id="toast"></div>
+<script>
+const $ = (id) => document.getElementById(id);
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) { if (k === 'class') e.className = v; else if (k.startsWith('on')) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v); }
+  for (const c of kids.flat()) if (c != null) e.append(c.nodeType ? c : document.createTextNode(String(c)));   // text nodes only: no innerHTML, no XSS
+  return e;
+}
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(t._t); t._t = setTimeout(() => t.style.display = 'none', 5000); }
+$('adminKey').value = sessionStorage.getItem('adminKey') || '';
+$('adminKey').addEventListener('change', () => sessionStorage.setItem('adminKey', $('adminKey').value));
+const authHeaders = () => $('adminKey').value ? { 'X-API-Key': $('adminKey').value } : {};
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  let body = null; try { body = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error((body && body.detail) ? (typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)) : `HTTP ${r.status}`);
+  return body;
+}
+document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
+  ['ask', 'docs', 'search'].forEach(t => $('tab-' + t).classList.toggle('hidden', t !== b.dataset.tab));
+  if (b.dataset.tab === 'docs') loadDocs();
+}));
+
+async function loadStats() {
+  try { const s = await api('/api/stats');
+    $('stats').textContent = `${s.documents} docs · ${s.chunks} chunks · embeddings: ${s.embedder} · LLM: ${s.llm}` + (s.llm_is_offline_heuristic ? ' (offline extractive fallback)' : '');
+  } catch (e) { $('stats').textContent = 'service starting… ' + e.message; setTimeout(loadStats, 4000); }
+}
+
+// ---------------------------------------------------------------- ask
+let lastAnswer = null;
+function showSource(eid) {
+  const c = lastAnswer.citations[eid]; const box = $('source'); box.classList.remove('hidden'); box.replaceChildren(
+    h('b', {}, `${eid} · ${c.title}`), h('div', { class: 'muted' }, `doc_id: ${c.doc_id} · source: ${c.source}` + (c.heading ? ` · section: ${c.heading}` : '') +
+      (c.also_doc_ids.length ? ` · identical text also in: ${c.also_doc_ids.join(', ')}` : '')), h('pre', {}, c.text));
+}
+function chips(ids) { return (ids || []).map(e => h('button', { class: 'chip', title: 'show source', onclick: () => showSource(e) }, e)); }
+function renderAnswer(a) {
+  lastAnswer = a; $('source').classList.add('hidden');
+  const labels = { answered: 'answered', insufficient_evidence: 'insufficient evidence', conflicting_evidence: 'conflicting evidence' };
+  const box = h('div', { class: 'card' },
+    h('span', { class: 'badge ' + a.status }, labels[a.status] || a.status), a.degraded ? h('span', { class: 'badge insufficient_evidence', style: 'margin-left:6px' }, 'degraded (LLM unavailable)') : null,
+    a.cached ? h('span', { class: 'muted', style: 'margin-left:8px' }, 'cached') : null,
+    h('p', {}, a.answer),
+    a.missing_info ? h('p', { class: 'muted' }, 'Missing: ' + a.missing_info) : null,
+    a.conflicts.length ? h('div', {}, h('b', {}, 'Conflicting positions'), a.conflicts.map(k => h('div', { class: 'claim' }, k.topic + ': ',
+      k.positions.map(p => h('span', {}, ' • ', p.claim, ' ', chips(p.evidence_ids)))))) : null,
+    a.claims.length ? h('div', {}, h('b', {}, 'Claims & citations'), a.claims.map(c => h('div', { class: 'claim' + (c.supported ? '' : ' unsupported') },
+      c.text, ' ', chips(c.evidence_ids), c.supported ? '' : h('span', { class: 'muted' }, ` ⚠ not verified (${c.support_score})`)))) : null,
+    a.warnings.length ? h('div', { class: 'muted' }, a.warnings.map(w => h('div', {}, '⚠ ' + w))) : null,
+    h('details', {}, h('summary', { class: 'muted' }, `sub-queries · usage · timings`), h('pre', {}, JSON.stringify({ sub_queries: a.sub_queries, usage: a.usage, timings_ms: a.timings_ms, evidence_docs: a.evidence_doc_ids }, null, 1))));
+  $('result').replaceChildren(box);
+}
+$('askBtn').addEventListener('click', async () => {
+  const question = $('q').value.trim(); if (question.length < 3) return toast('Type a question first');
+  const btn = $('askBtn'); btn.disabled = true; $('result').replaceChildren(); const steps = $('steps'); steps.classList.remove('hidden'); steps.replaceChildren(h('div', {}, '… working'));
+  const body = { question, options: { mode: $('o-mode').value, rerank: $('o-rerank').value === '1', hops: +$('o-hops').value, use_planner: $('o-plan').value === '1' } };
+  try {
+    const r = await fetch('/api/ask/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) { let d = ''; try { d = (await r.json()).detail; } catch (e) {} throw new Error(d || `HTTP ${r.status}`); }
+    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    while (true) {
+      const { value, done } = await reader.read(); if (done) break; buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, i); buf = buf.slice(i + 2);
+        const ev = /event: (\w+)/.exec(block)?.[1]; const data = JSON.parse(/data: (.*)/s.exec(block)[1]);
+        if (ev === 'step') steps.append(h('div', {}, `${data.step}  ` + JSON.stringify(Object.fromEntries(Object.entries(data).filter(([k]) => k !== 'step' && k !== 'per_query')))));
+        else if (ev === 'answer') renderAnswer(data); else if (ev === 'error') throw new Error(data.detail);
+      }
+    }
+  } catch (e) { toast(e.message); } finally { btn.disabled = false; }
+});
+
+// ---------------------------------------------------------------- documents
+let docOffset = 0; const PAGE = 15;
+async function loadDocs() {
+  try {
+    const d = await api(`/api/documents?limit=${PAGE}&offset=${docOffset}&q=${encodeURIComponent($('docq').value)}`);
+    $('doclist').replaceChildren(...d.items.map(x => h('tr', {},
+      h('td', {}, h('button', { class: 'link', onclick: () => viewDoc(x.doc_id) }, x.title), h('div', { class: 'muted' }, x.doc_id)), h('td', {}, x.format), h('td', {}, x.n_chunks), h('td', {}, x.strategy),
+      h('td', {}, h('label', { class: 'link', style: 'cursor:pointer' }, 'replace', h('input', { type: 'file', class: 'hidden', onchange: (ev) => replaceDoc(x.doc_id, ev.target.files[0]) })),
+        h('button', { class: 'link danger', onclick: () => delDoc(x.doc_id) }, 'delete')))));
+    $('docmeta').textContent = `${d.total} document(s) · showing ${d.total ? d.offset + 1 : 0}–${d.offset + d.items.length}`;
+    loadStats();
+  } catch (e) { toast(e.message); }
+}
+async function viewDoc(id) {
+  try { const d = await api('/api/documents/' + encodeURIComponent(id)); const v = $('docview'); v.classList.remove('hidden');
+    v.replaceChildren(h('b', {}, d.title), h('div', { class: 'muted' }, `${d.doc_id} · ${d.format} · ${d.n_chars} chars · ${d.chunks.length} chunks`),
+      ...d.chunks.map(c => h('div', {}, h('div', { class: 'muted' }, `#${c.index}` + (c.heading ? ` · ${c.heading}` : '') + ` · ${c.n_tokens} tokens`), h('pre', {}, c.text))));
+  } catch (e) { toast(e.message); }
+}
+function showUpload(results) { $('upload-out').replaceChildren(...results.map(r => h('div', {}, `${r.doc_id}: ${r.status}` + (r.detail ? ` — ${r.detail}` : '') + (r.chunks ? ` (${r.chunks} chunks)` : '')))); }
+$('uploadBtn').addEventListener('click', async () => {
+  const fs = $('files').files; if (!fs.length) return toast('Choose at least one file');
+  const fd = new FormData(); for (const f of fs) fd.append('files', f); fd.append('chunking', $('chunking').value);
+  $('uploadBtn').disabled = true;
+  try { showUpload((await api('/api/documents', { method: 'POST', body: fd, headers: authHeaders() })).results); $('files').value = ''; loadDocs(); } catch (e) { toast(e.message); } finally { $('uploadBtn').disabled = false; }
+});
+$('pasteBtn').addEventListener('click', async () => {
+  try { const r = await api('/api/documents/text?chunking=' + $('chunking').value, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ title: $('pt-title').value, text: $('pt-text').value }) }); showUpload([r]); loadDocs(); } catch (e) { toast(e.message); }
+});
+async function replaceDoc(id, file) {
+  if (!file) return; const fd = new FormData(); fd.append('file', file); fd.append('chunking', $('chunking').value);
+  try { const r = await api('/api/documents/' + encodeURIComponent(id), { method: 'PUT', body: fd, headers: authHeaders() }); showUpload([r]); loadDocs(); } catch (e) { toast(e.message); }
+}
+async function delDoc(id) {
+  if (!confirm('Delete ' + id + '?')) return;
+  try { await api('/api/documents/' + encodeURIComponent(id), { method: 'DELETE', headers: authHeaders() }); toast('deleted'); loadDocs(); } catch (e) { toast(e.message); }
+}
+$('docRefresh').addEventListener('click', () => { docOffset = 0; loadDocs(); });
+$('prev').addEventListener('click', () => { docOffset = Math.max(0, docOffset - PAGE); loadDocs(); });
+$('next').addEventListener('click', () => { docOffset += PAGE; loadDocs(); });
+
+// ---------------------------------------------------------------- search debugger
+$('searchBtn').addEventListener('click', async () => {
+  const query = $('sq').value.trim(); if (!query) return;
+  try {
+    const r = await api('/api/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, mode: $('s-mode').value, fusion: $('s-fusion').value, rerank: $('s-rerank').value === '1', top_k: 10 }) });
+    $('sresult').replaceChildren(...r.hits.map((x, i) => h('div', { class: 'card' }, h('b', {}, `${i + 1}. ${x.title}`), h('span', { class: 'muted' }, `  score ${x.score} · ${x.doc_id}`),
+      h('div', { class: 'muted' }, JSON.stringify(x.components)), h('pre', {}, x.text))));
+  } catch (e) { toast(e.message); }
+});
+loadStats();
+</script>
+</body>
+</html>
