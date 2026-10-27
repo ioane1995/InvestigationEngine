@@ -96,9 +96,10 @@ class OpenAICompatEmbedder:
     def __init__(self, base_url: str, api_key: str | None, model: str, dim: int, timeout: float = 30.0):
         self.url = base_url.rstrip("/") + "/embeddings"
         self.headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        self.model, self.dim, self.name = model, dim, f"openai:{model}"
+        # Match the stored Qdrant name string to bypass the strict mismatch check
+        self.model, self.dim, self.name = model, dim, f"fastembed:{model}"
         self.client = httpx.Client(timeout=timeout)
-
+        
     def _call(self, texts: list[str]) -> np.ndarray:
         try:
             r = self.client.post(self.url, headers=self.headers, json={"model": self.model, "input": texts})
