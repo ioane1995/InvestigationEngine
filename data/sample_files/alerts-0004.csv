@@ -1,0 +1,3 @@
+time,service,alert,severity
+2024-07-10T9:36Z,audit-log,ConnectionPoolExhausted,critical
+2024-07-10T10:46Z,sms-relay,ConnectionPoolExhausted,critical

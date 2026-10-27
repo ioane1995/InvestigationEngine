@@ -1,0 +1,10 @@
+{
+  "id": "CHG-0005",
+  "title": "Change CHG-0005",
+  "date": "2025-05-08",
+  "service": "audit-log",
+  "type": "certificate rotation",
+  "author": "Ana Kapanadze",
+  "summary": "rotated the TLS certificate used by audit-log",
+  "status": "deployed"
+}

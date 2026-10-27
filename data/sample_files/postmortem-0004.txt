@@ -1,0 +1,10 @@
+Postmortem: INC-0004
+
+This postmortem reviews INC-0004, which caused report generation failures.
+
+- Duration: 58 minutes
+- Root cause change: CHG-0005
+- Corrective action: document rollback steps in the runbook
+- Action owner: Nika Beridze
+
+The Data Platform team reviewed the timeline. Services audit-log, sms-relay were involved.

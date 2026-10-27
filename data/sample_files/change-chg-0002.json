@@ -1,0 +1,10 @@
+{
+  "id": "CHG-0002",
+  "title": "Change CHG-0002",
+  "date": "2025-11-28",
+  "service": "data-warehouse-sync",
+  "type": "certificate rotation",
+  "author": "Nino Mchedlishvili",
+  "summary": "rotated the TLS certificate used by data-warehouse-sync",
+  "status": "deployed"
+}

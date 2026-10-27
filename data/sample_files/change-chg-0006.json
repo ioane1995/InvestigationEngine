@@ -1,0 +1,10 @@
+{
+  "id": "CHG-0006",
+  "title": "Change CHG-0006",
+  "date": "2024-08-27",
+  "service": "risk-scoring",
+  "type": "database migration",
+  "author": "Nino Mchedlishvili",
+  "summary": "ran a schema migration adding an index on the sessions table used by risk-scoring",
+  "status": "deployed"
+}

@@ -1,0 +1,4 @@
+time,service,alert,severity
+2024-10-11T9:20Z,rate-limiter,ConnectionPoolExhausted,critical
+2024-10-11T10:15Z,notifications,ConnectionPoolExhausted,critical
+2024-10-11T11:31Z,session-cache,ConnectionPoolExhausted,critical

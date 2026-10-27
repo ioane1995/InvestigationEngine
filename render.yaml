@@ -1,0 +1,18 @@
+# Render blueprint (alternative to Hugging Face Spaces). Free web services sleep after ~15 min idle and have 512 MB RAM:
+# use the lighter embedder (EMBEDDING_PROVIDER=openai with a hosted embedding API) or HF Spaces (16 GB RAM) for the BM25 mirror of 50k+ docs.
+services:
+  - type: web
+    name: ai-investigation-engine
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - { key: APP_ENV, value: production }
+      - { key: ADMIN_API_KEY, sync: false }
+      - { key: QDRANT_URL, sync: false }
+      - { key: QDRANT_API_KEY, sync: false }
+      - { key: LLM_PROVIDER, value: openai }
+      - { key: LLM_BASE_URL, value: "https://api.groq.com/openai/v1" }
+      - { key: LLM_MODEL, value: llama-3.3-70b-versatile }
+      - { key: LLM_API_KEY, sync: false }
+      - { key: EMBEDDING_PROVIDER, value: fastembed }

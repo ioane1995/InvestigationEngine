@@ -1,0 +1,10 @@
+Postmortem: INC-0002
+
+This postmortem reviews INC-0002, which caused payment processing delays.
+
+- Duration: 120 minutes
+- Root cause change: CHG-0003
+- Corrective action: add an alert on queue depth
+- Action owner: Salome Japaridze
+
+The Payments Core team reviewed the timeline. Services payments-api, feature-flags were involved.

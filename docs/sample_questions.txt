@@ -1,0 +1,4 @@
+What was the severity of INC-0001?
+Which change caused INC-0003 and who authored it?
+How long did INC-0002 last?
+What was the total financial loss caused by INC-0001?

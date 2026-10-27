@@ -1,0 +1,10 @@
+Postmortem: INC-0006
+
+This postmortem reviews INC-0006, which caused payment processing delays.
+
+- Duration: 135 minutes
+- Root cause change: CHG-0007
+- Corrective action: add an alert on queue depth
+- Action owner: Giorgi Lomidze
+
+The Risk team reviewed the timeline. Services risk-scoring were involved.

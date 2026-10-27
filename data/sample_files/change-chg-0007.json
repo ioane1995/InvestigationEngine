@@ -1,0 +1,10 @@
+{
+  "id": "CHG-0007",
+  "title": "Change CHG-0007",
+  "date": "2024-01-16",
+  "service": "risk-scoring",
+  "type": "feature-flag rollout",
+  "author": "Eka Natsvlishvili",
+  "summary": "enabled feature flag strict-validation for all traffic on risk-scoring",
+  "status": "deployed"
+}

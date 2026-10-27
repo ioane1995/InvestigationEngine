@@ -1,0 +1,10 @@
+{
+  "id": "CHG-0001",
+  "title": "Change CHG-0001",
+  "date": "2025-09-08",
+  "service": "data-warehouse-sync",
+  "type": "certificate rotation",
+  "author": "Nika Beridze",
+  "summary": "rotated the TLS certificate used by data-warehouse-sync",
+  "status": "deployed"
+}

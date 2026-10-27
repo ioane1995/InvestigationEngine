@@ -1,0 +1,10 @@
+{
+  "id": "CHG-0003",
+  "title": "Change CHG-0003",
+  "date": "2025-10-19",
+  "service": "payments-api",
+  "type": "configuration change",
+  "author": "Sandro Bregvadze",
+  "summary": "reduced the connection pool size of payments-api from 50 to 5",
+  "status": "deployed"
+}

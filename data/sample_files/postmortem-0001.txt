@@ -1,0 +1,10 @@
+Postmortem: INC-0001
+
+This postmortem reviews INC-0001, which caused report generation failures.
+
+- Duration: 64 minutes
+- Root cause change: CHG-0002
+- Corrective action: introduce a staged rollout for configuration changes
+- Action owner: Salome Japaridze
+
+The Data Platform team reviewed the timeline. Services data-warehouse-sync, cdn-edge were involved.

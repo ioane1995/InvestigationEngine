@@ -1,0 +1,10 @@
+{
+  "id": "CHG-0004",
+  "title": "Change CHG-0004",
+  "date": "2024-01-19",
+  "service": "rate-limiter",
+  "type": "feature-flag rollout",
+  "author": "Sandro Bregvadze",
+  "summary": "enabled feature flag bulk-mode for all traffic on rate-limiter",
+  "status": "deployed"
+}
