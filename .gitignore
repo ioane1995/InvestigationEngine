@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+data/qdrant/
+data/corpus/
+data/*.jsonl
+eval/results/
+.pytest_cache/
+*.egg-info/
