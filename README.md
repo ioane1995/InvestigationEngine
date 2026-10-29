@@ -6,12 +6,12 @@ sources, contradictory sources are reported as such, and the system **abstains**
 
 **Live demo:** <https://ai-investigation-engine-u1f0.onrender.com>
 Free Render plan: the service sleeps when idle. The first request after a pause takes about a minute while the in-memory keyword index is
-rebuilt from Qdrant Cloud. Wait for the page to load, then ask a question.
+rebuilt from Qdrant Cloud (about 76 s to load 61 768 chunks). Wait for the page to load, then ask a question.
 
 **Corpus in the live system:** 51 264 unique documents (61 768 chunks) of a synthetic incident-investigation dataset, reproducible with
 `python -m scripts.generate_synthetic --incidents 3200 --filler 38800 --seed 21`.
 
-**Try these questions** (gold answers are in `data/corpus_50k/questions.jsonl`):
+**Try these questions** (gold answers are in `eval/questions/scale_50k_seed21.jsonl`):
 
 - Who authored change CHG-16378? *(single document)*
 - Which team owns the service that was modified by the root cause change of INC-2622? *(multi-hop: incident → change → service catalogue)*
@@ -29,11 +29,11 @@ published here, because anyone holding it can delete documents.
 | Vector DB + embeddings + semantic search | Qdrant (`app/stores/qdrant_store.py`), `app/embeddings.py` |
 | Hybrid search + own algorithmic component | `app/retrieval/`: own BM25 inverted index, own RRF / weighted fusion, own feature re-ranker + MMR, own SimHash near-duplicate collapse |
 | LLM + RAG, multi-doc synthesis, multi-step, citations, conflicts, abstention, error handling, tool calling | `app/rag/engine.py`, `app/llm/` (function calls: `submit_plan`, `search_documents`, `get_document`, `submit_answer`) |
-| Own automated evaluation (≥40 questions, metrics, ≥2 configurations, analysis) | `eval/` → [docs/EVALUATION_REPORT.md](docs/EVALUATION_REPORT.md) |
+| Own automated evaluation (≥40 questions, metrics, ≥2 configurations, analysis) | `eval/` → [docs/EVALUATION_REPORT.md](docs/EVALUATION_REPORT.md) · questions in `eval/questions/` |
 | Python backend + functional UI | FastAPI (`app/api/`) + single-page UI (`app/static/index.html`) |
 | ≥50 000 documents | synthetic incident corpus (51 264 unique docs) + HotpotQA loader, see *Dataset* |
 | Free hosting, persistence, secrets, cost awareness | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §5–6 · `Dockerfile` · `render.yaml` |
-| Automated tests | `pytest -q`: 115 tests in `tests/` (no network or API keys needed) |
+| Automated tests | `pytest -q`: 115 tests in `tests/` (no network or API keys needed) · CI in `.github/workflows/ci.yml` |
 
 ## Architecture in short
 
@@ -66,13 +66,14 @@ pytest -q
 
 With real models, set in `.env`: `EMBEDDING_PROVIDER=fastembed` (BAAI/bge-small-en-v1.5, CPU) and `LLM_PROVIDER=openai` with
 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` for any OpenAI-compatible endpoint with tool calling (Groq, Gemini's compatible endpoint,
-OpenRouter, OpenAI, local vLLM/Ollama). Check the provider's *current* free-tier limits first.
+OpenRouter, OpenAI, local vLLM/Ollama). The live demo uses Groq with `openai/gpt-oss-120b`. Check the provider's *current* model list and
+free-tier limits first, because model names are retired over time.
 Without an LLM key the app still works in a clearly labelled degraded, extractive mode.
 
 ## Dataset
 
-- **Synthetic incident corpus (primary, 50 131 generated documents, 51 264 unique in the live index).**
-  `python -m scripts.generate_synthetic --incidents 3200 --filler 37000 --seed 21 --out data/corpus_50k`.
+- **Synthetic incident corpus (primary, 51 958 generated documents, 51 264 unique after exact duplicates are rejected at ingest).**
+  `python -m scripts.generate_synthetic --incidents 3200 --filler 38800 --seed 21 --out data/corpus_50k`.
   Changes → incidents → services, with incident reports, post-mortems, change records, a service catalogue, alert logs, runbooks and digests,
   plus *injected* exact duplicates, near duplicates, contradicting report/post-mortem pairs, missing post-mortems and never-recorded attributes.
   It is seeded, so it is byte-identical on every run, and every question carries exact gold documents and answers. It mirrors the task's own
@@ -91,7 +92,8 @@ python -m eval.tables eval/results/real_20b.json eval/results/real_120b.json
 ```
 
 54 questions per corpus (simple, multi-hop, natural-language multi-hop, unanswerable, conflicting), 7 retrieval/pipeline configurations,
-2 chunking strategies, 2 embedders and 2 LLMs. Metrics: Recall@1/5/10, MRR, evidence recall, answer correctness, abstention recall/precision,
+2 chunking strategies, 2 embedders and 2 LLMs. The question sets with gold documents and answers are committed in `eval/questions/`.
+Metrics: Recall@1/5/10, MRR, evidence recall, answer correctness, abstention recall/precision,
 conflict-detection recall, citation precision/recall, faithfulness, latency and LLM calls. Full methodology, results and error analysis:
 [docs/EVALUATION_REPORT.md](docs/EVALUATION_REPORT.md).
 
@@ -111,9 +113,10 @@ conflict-detection recall, citation precision/recall, faithfulness, latency and 
 
 - The free Render plan sleeps when idle and has 512 MB RAM, so the first request is slow and only one worker runs.
 - The BM25 index lives in RAM and is rebuilt from Qdrant at start-up; very large corpora need more memory.
-- Query embeddings come from the Hugging Face Inference API free tier. If its credit runs out or it is unreachable (for example HTTP 402/429/5xx), semantic search is skipped and the system answers from keyword search only, with a visible warning.
-- Free LLM tiers are rate limited (for example Groq's tokens-per-minute cap); the pipeline retries, paces requests, and falls back to a
-  labelled offline reader, which is reported as a *degraded* answer.
+- Query embeddings come from the Hugging Face Inference API free tier. If its credit runs out, the token lacks permission, or the service is
+  unreachable (for example HTTP 402/403/429/5xx), semantic search is skipped and the system answers from keyword search only, with a visible warning.
+- Free LLM tiers are rate limited (for example Groq's tokens-per-minute and tokens-per-day caps) and model names can be retired; the pipeline
+  retries, paces requests, and falls back to a labelled offline reader, which is reported as a *degraded* answer.
 - Evaluation uses a synthetic corpus with rule-based scoring; it measures this pipeline well but is not a substitute for human review.
 
 ## Troubleshooting
@@ -121,6 +124,8 @@ conflict-detection recall, citation precision/recall, faithfulness, latency and 
 | Symptom | Cause / fix |
 |---|---|
 | UI shows *degraded (LLM unavailable)*; log says `Request URL is missing an 'http://' or 'https://' protocol` | `LLM_BASE_URL` is empty or lacks `https://`. Use e.g. `https://api.groq.com/openai/v1` (no quotes). Variables already set in your shell override `.env` (`echo $env:LLM_BASE_URL` in PowerShell). |
+| `404 Not Found` from `.../chat/completions` | the model name no longer exists at the provider. List models with `GET /openai/v1/models` and set `LLM_MODEL` to one that is listed (e.g. `openai/gpt-oss-120b`). |
+| `403 Forbidden` or `402` from the embeddings URL; log says `dense retrieval unavailable` | the Hugging Face token lacks the "Inference Providers" permission or its free credit is used up. Create a new token with that permission and set `EMBEDDING_API_KEY`. |
 | `LLMAuthError … authentication failed` | wrong or expired `LLM_API_KEY` |
 | `429` / `rate limited` in the log | free-tier quota: wait, switch model, set *Planner* to off in the UI (1 LLM call instead of 2), or raise `--pause` in evaluations |
 | `StoreMismatch` at start-up | the Qdrant data was built with another embedding model: delete `data/qdrant` (local) or re-ingest |
