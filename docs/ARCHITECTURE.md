@@ -49,7 +49,7 @@ All of the following are implemented in this repo without a search/ranking libra
 5. **Evidence assessment / abstention gate** — IDF-weighted share of the question's content terms covered by the top evidence; an identifier in the question that appears in *no* retrieved text forces abstention before any LLM call (saves cost and removes a hallucination path).
 6. **Hop expansion** — identifiers found in the best hits but absent from the question (e.g. `CHG-0123` inside an incident report) trigger follow-up searches: a deterministic form of multi-hop retrieval that works even without an LLM.
 
-Dense retrieval uses Qdrant (cosine). The in-process mirror (`CorpusIndex`) is rebuilt from Qdrant at start-up (~tens of seconds for 60k chunks), which keeps the stack to **one** external service.
+Dense retrieval uses Qdrant (cosine). The in-process mirror (`CorpusIndex`) is rebuilt from Qdrant at start-up (about 76 s for 61 768 chunks on the free Render plan), which keeps the stack to **one** external service.
 
 ## 4. LLM / RAG pipeline
 
@@ -85,13 +85,12 @@ Known limit: a *semantic* attack with no trigger words ("per updated policy the 
 
 ## 5. Deployment (free tier)
 
-
 **Live URL:** <https://ai-investigation-engine-u1f0.onrender.com>
 
 ### What runs where
 - **Render** hosts the stateless application container. Nothing durable is stored on its disk.
 - **Qdrant Cloud** stores the 51 264 documents / 61 768 chunks (vectors and payloads) and the document registry. On start-up the app rebuilds its in-memory keyword index (BM25) from Qdrant, so a restart or a free-tier sleep loses no data.
-- **Embeddings and LLM** are external HTTPS APIs. All keys are environment variables set in the Render dashboard (`QDRANT_API_KEY`, `LLM_API_KEY`, embedding API key, `ADMIN_API_KEY`); `.env` is git-ignored and no secret is in the repository. Write endpoints (upload / update / delete) require the `X-API-Key` header and are disabled in production if no admin key is configured.
+- **Embeddings and LLM** are external HTTPS APIs. All keys are environment variables set in the Render dashboard (`QDRANT_API_KEY`, `LLM_API_KEY`, `EMBEDDING_API_KEY`, `ADMIN_API_KEY`); `.env` is git-ignored and no secret is in the repository. Write endpoints (upload / update / delete) require the `X-API-Key` header and are disabled in production if no admin key is configured.
 
 ### Deployment configuration (Render environment)
 Defined in `render.yaml`; values marked *secret* are set only in the Render dashboard.
@@ -101,27 +100,27 @@ Defined in `render.yaml`; values marked *secret* are set only in the Render dash
 | `APP_ENV` | `production` (write endpoints require the admin key) |
 | `ADMIN_API_KEY`, `QDRANT_API_KEY`, `LLM_API_KEY`, `EMBEDDING_API_KEY` | *secret* |
 | `QDRANT_URL` | Qdrant Cloud cluster URL (*secret* in the blueprint) |
-| `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL` | `openai` (OpenAI-compatible) / Groq endpoint / `llama-3.3-70b-versatile` |
-| `EMBEDDING_PROVIDER` / `EMBEDDING_BASE_URL` | `openai` (OpenAI-compatible) / Hugging Face inference router |
+| `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL` | `openai` (OpenAI-compatible) / `https://api.groq.com/openai/v1` / `openai/gpt-oss-120b` |
+| `EMBEDDING_PROVIDER` / `EMBEDDING_BASE_URL` | `openai` (OpenAI-compatible route) / Hugging Face inference router |
 | `EMBEDDING_MODEL` / `EMBEDDING_DIM` | `BAAI/bge-small-en-v1.5` / `384` |
 | `EMBEDDING_STORE_ID` | `fastembed:BAAI/bge-small-en-v1.5` (declares API query vectors compatible with the stored ones) |
 
-The offline evaluations in `docs/EVALUATION_REPORT.md` used other generation models (gpt-oss-20b/120b); the model above is the one serving the live demo.
+**Model change.** The first deployment used `llama-3.3-70b-versatile`. Groq later removed that model: the live logs showed HTTP 404 from `/chat/completions`, and a test against the provider's model list confirmed that only other models were available. The deployment now uses `openai/gpt-oss-120b`, the same model as the evaluation runs. `openai/gpt-oss-20b` is the fallback when the 120b daily token limit is reached.
 
 ### Decision: embeddings through an API instead of a local model
-Locally the 61 768 chunks were embedded once with `fastembed` (BAAI/bge-small-en-v1.5, ONNX). In the first Render deployment the same model was loaded inside the container, which exceeded the free plan's 512 MB RAM and caused an out-of-memory crash on start-up. The deployed service therefore embeds only the *query* through the Hugging Face Inference API (`EMBEDDING_PROVIDER=hf`, feature-extraction route), using the same model and dimension (384), so the stored vectors did not have to be re-created.
-- **Risk:** the same model name does not guarantee identical vectors (different quantisation or query prefix). `scripts/check_embedding_compat.py` compares local and API embeddings of the same texts. Result: **not completed.** The first run compared local fastembed with itself (cosine 1.0000, not evidence), and the runs against the API failed with HTTP 402 (the free Inference Providers credit was exhausted). Indirect evidence instead: in the live system, dense-only search returns the expected documents for the test questions (see the deployment probe in the evaluation report).
+Locally the 61 768 chunks were embedded once with `fastembed` (BAAI/bge-small-en-v1.5, ONNX). In the first Render deployment the same model was loaded inside the container, which exceeded the free plan's 512 MB RAM and caused an out-of-memory crash on start-up. The deployed service therefore embeds only the *query* through the Hugging Face Inference API (OpenAI-compatible `/v1/embeddings` route of the router, `EMBEDDING_PROVIDER=openai`), using the same model and dimension (384), so the stored vectors did not have to be re-created.
+- **Risk:** the same model name does not guarantee identical vectors (different quantisation or query prefix). `scripts/check_embedding_compat.py` compares local and API embeddings of the same texts. Result: **not completed.** The first run compared local fastembed with itself (cosine 1.0000, not evidence), and the runs against the API failed (HTTP 402 when the free Inference Providers credit was exhausted, later HTTP 403 because of token permissions). Until a successful comparison exists, the compatibility of the API vectors with the stored vectors is **unverified**. [UPDATE THIS PARAGRAPH with the cosine similarity once the check succeeds.]
 - **Pinning:** the vector store records the identity of the embedder that built it and refuses to start with a different one (`StoreMismatch`). Because the API serves the same model, the identity is set explicitly with `EMBEDDING_STORE_ID=fastembed:BAAI/bge-small-en-v1.5`; the override is logged at start-up.
-- **Trade-offs:** one more external dependency and extra latency per question (about 490 ms for a dense-only search against about 300 ms for keyword search). If the embedding API fails, is rate limited (429, 5xx; retried twice) or refuses the call (for example 402 when the free credit is used up), search falls back to keyword (BM25) only and the answer carries the warning "semantic search unavailable". A malformed `EMBEDDING_BASE_URL` is detected at start-up and produces the same fallback with a clear log line.
+- **Trade-offs:** one more external dependency and extra latency per question (about 490 ms for a dense-only search against about 300 ms for keyword search). If the embedding API fails, is rate limited (429, 5xx; retried twice) or refuses the call (402 when the free credit is used up, 403 when the token lacks permission), search falls back to keyword (BM25) only and the answer carries the warning "semantic search unavailable". The live logs confirm this fallback (`dense retrieval unavailable, falling back to BM25 only`). A malformed `EMBEDDING_BASE_URL` is detected at start-up and produces the same fallback with a clear log line.
 
 ### Resources and free-tier limits
 | Item | Value |
 |---|---|
-| RAM after start-up (Render metrics) | <measured MB> of 512 MB |
-| Cold start after sleep (index rebuild from Qdrant) | <measured seconds> |
+| RAM after start-up (Render metrics) | On render Metrics needs paid subscription to show.
+| Cold start after sleep (index rebuild from Qdrant) | about 76 s to load 51 264 docs / 61 768 chunks (from the start-up log), plus container start |
 | Free web service sleeps after idle time | first request after idle is slow (see above) |
-| Qdrant free cluster | holds all 61 768 chunks <confirm usage in the Qdrant dashboard> |
-| LLM free tier | rate limits (HTTP 429) are handled by retry with back-off, optional pacing (`LLM_MIN_INTERVAL_S`), a per-IP request limit (default 20 / min) and a 10-minute answer cache |
+| Qdrant free cluster | holds all 61 768 chunks 223.07 MiB of 4.00 GiB 342.51 MiB of 1.00 GiB 0.05 vCPUs of 0.5 vCPUs |
+| LLM free tier | rate limits (HTTP 429) are handled by retry with back-off, optional pacing (`LLM_MIN_INTERVAL_S`), a per-IP request limit (default 20 / min) and a 10-minute answer cache; model names can be retired by the provider (see *Model change*) |
 | Single worker | required because the BM25 mirror lives in process memory |
 
 ### Cost
