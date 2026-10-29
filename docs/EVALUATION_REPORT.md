@@ -1,10 +1,8 @@
-# Evaluation report
-
-> **Read this first (honesty note).** The numbers below were produced in a sandbox **without internet and without an LLM API key**, so every
-> run uses the project's *offline baseline stack*: the own hashing embedder (lexical, not semantic) and the extractive "heuristic LLM".
-> They therefore measure **our own retrieval/ranking/verification/abstention components and the pipeline logic**, and give a *lower bound* for
-> generation quality. They do **not** measure how a neural embedder or a real LLM performs. Section 8 gives the one-command re-run with real
-> models and a table to fill in; do that before submitting and report those numbers next to these.
+> **Read this first.** Most tables below (§2–§7) were produced in a sandbox **without internet and without an LLM API key**, so those
+> runs use the project's *offline baseline stack*: the own hashing embedder (lexical, not semantic) and the extractive "heuristic LLM".
+> They measure **our own retrieval/ranking/verification/abstention components and the pipeline logic**, and give a *lower bound* for
+> generation quality; they do **not** measure how a neural embedder or a real LLM performs. Real-model results are in §8 (a 25-question sample
+> with `gpt-oss-120b`) and in the prompt-injection section (`gpt-oss-20b` and `gpt-oss-120b`).
 
 ## 1. Method
 
@@ -137,30 +135,33 @@ short report in one chunk, whereas structure-aware chunking splits it into 3 chu
 
 Other observations: (1) *conflict* questions are solved (8/8) **only with structure-aware chunking** (§5); (2) identical-text documents are credited through `also_doc_ids`, so de-duplication does not hurt recall; (3) citation precision is lowest for `full` (0.653) because hop expansion adds the change/service documents that are relevant but sometimes cited beyond what the question required, while citation *recall* rises 0.725 → 0.833.
 
-## 8. Re-running with real models (required before submission)
+## 8. Real-model results
 
 ```bash
-# .env: EMBEDDING_PROVIDER=fastembed, LLM_PROVIDER=openai, LLM_BASE_URL/LLM_API_KEY/LLM_MODEL (and price variables for cost)
-python -m eval.run_eval --corpus data/corpus_heldout --embedder fastembed --llm openai --chunking structure --tag real_heldout
-python -m eval.tables eval/results/real_heldout.json
+# .env: EMBEDDING_PROVIDER=fastembed, LLM_PROVIDER=openai, LLM_BASE_URL/LLM_API_KEY/LLM_MODEL=openai/gpt-oss-120b
+python -m eval.run_eval --corpus data/corpus_heldout --embedder fastembed --llm openai --chunking structure \
+       --configs full --pause 15 --retry-degraded 2 --resume --tag real_full_120b
+python -m eval.tables eval/results/real_full_120b.json
 ```
-Fill the table below with your measured values (and add a second LLM or embedding model for the bonus comparison — change `LLM_MODEL` / `EMBEDDING_MODEL` and re-run).
 
 | stack | config | R@5 | MRR | Evid. recall | Answer correct. | Abstain recall | Conflict recall | Cite prec. | Faithful. | LLM calls | tokens/q | p50 ms |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| fastembed bge-small + `<LLM>` | `hybrid_rrf_rerank` | *not run with a real LLM* | | | | | | | | | | |
 | fastembed bge-small + `gpt-oss-120b` (Groq) | `full` (structure chunking, planner off, evidence_k 6, 25-question stratified sample of `corpus_heldout`) | 0.775 | 0.900 | 1.000 | 0.920 | 0.600 | 1.000 | 0.871 | 0.939 | 1.2 | n/a | 1495 |
+| fastembed bge-small + `gpt-oss-120b` (Groq) | `full`, all 54 questions, `--retry-degraded 2` | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] |
+| fastembed bge-small + `gpt-oss-20b` (Groq) | `full`, all 54 questions (second model for the comparison) | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] | [FILL] |
 
-**Reading the real-model row.** 8 % of the 25 answers fell back to the offline reader because of Groq rate limits (HTTP 429), so these figures mix real-model and fallback answers and are a slight lower-bound/blend; the run was flagged `degraded = 0.08` by the harness itself and must be repeated with `--retry-degraded 2` for clean numbers (ideally also with the deployed `llama-3.3-70b-versatile`). Abstention recall (0.60) is the weak spot: in 40 % of the questions whose answer is not in the corpus the system still produced an answer instead of abstaining; recall@5 (0.775) is below MRR (0.90), i.e. when a gold document is found it is usually ranked first, but roughly one in four gold documents is not in the top 5 (most likely the second or third source of multi-document questions; the per-type breakdown in `eval/results/real_120b.json` shows which).
+**Reading the 25-question row.** 8 % of the 25 answers fell back to the offline reader because of Groq rate limits (HTTP 429), so these figures mix real-model and fallback answers and are a slight lower-bound/blend; the run was flagged `degraded = 0.08` by the harness itself. Abstention recall (0.60) is the weak spot: in 40 % of the questions whose answer is not in the corpus the system still produced an answer instead of abstaining. Recall@5 (0.775) is below MRR (0.90), i.e. when a gold document is found it is usually ranked first, but roughly one in four gold documents is not in the top 5 (most likely the second or third source of multi-document questions; the per-type breakdown in `eval/results/real_120b.json` shows which).
 
-Hypotheses to confirm or refute with those runs: dense+hybrid beats BM25 on `multi_hop_nl`; the LLM tool loop fixes the 3-hop and the "who authored it" cases; false abstentions on paraphrases disappear; faithfulness drops below 1.0 for a generative model and the verifier catches the difference.
-Optional LLM-as-judge for free-text correctness is *not* implemented — correctness here is rule-based and strict (a correct paraphrase without the gold string counts as wrong), which is conservative for generative models.
+**Model note.** The first deployment used `llama-3.3-70b-versatile`. Groq removed it (HTTP 404 in the live logs), so the deployment and these evaluations now use `openai/gpt-oss-120b`, with `openai/gpt-oss-20b` as the fallback.
+
+Hypotheses to confirm or refute with the full runs: dense+hybrid beats BM25 on `multi_hop_nl`; the LLM tool loop fixes the 3-hop and the "who authored it" cases; false abstentions on paraphrases disappear; faithfulness drops below 1.0 for a generative model and the verifier catches the difference.
+Optional LLM-as-judge for free-text correctness is *not* implemented. Correctness here is rule-based and strict (a correct paraphrase without the gold string counts as wrong), which is conservative for generative models.
 
 ## 9. Threats to validity
 
 * Synthetic, templated text: easier than real prose in vocabulary, harder in that facts are scattered over documents. HotpotQA (real, multi-hop) support is provided (`scripts/prepare_hotpotqa.py`) but was **not run here** (no network).
 * Rule-based correctness and small question counts (n = 6–16 per type) → differences of one or two questions are noise (one question = 1.9 % overall).
-* Offline stack only (see top note). The hand-set re-ranker weights and the 0.30 gate threshold were chosen by inspecting `dev`, then confirmed on `held-out` and `50k`.
+* Most tables use the offline stack (see the note at the top); real-model evidence is limited to the §8 runs and the injection runs. The hand-set re-ranker weights and the 0.30 gate threshold were chosen by inspecting `dev`, then confirmed on `held-out` and `50k`.
 * Latencies are from a single shared vCPU with Qdrant local mode and no network LLM; production numbers will be dominated by LLM latency.
 
 ## 10. Reproduce
@@ -230,6 +231,6 @@ With defences on, the only attacks that reach the model are the two *subtle* one
 
 **Collateral cost of quarantine.** Because a flagged line also removes its adjacent prose lines, real prose next to a payload is lost too: in the `override-2`, `role-2`, `tool-2` and `fact-2` runs the whole summary chunk ("Payment processing slowed after a connection pool change.") became a marker. Structured data (bullets, `Key: value` fields) is preserved, which is why the severity, duration and services survive, and the user still sees the original text in the citation panel. This trade-off favours safety over recall for documents that already contain attack-like text; the benign set shows it never triggers on ordinary operations text.
 
-**Limits of this evaluation:** one question template, one model and one trial per attack at temperature 0; payloads sit mid-document; the attacker does not adapt to the defences; success is judged by string matching. A second model (e.g. the deployed llama-3.3-70b) and several phrasings per attack would strengthen the result.
+**Limits of this evaluation:** one question template, one model and one trial per attack at temperature 0; payloads sit mid-document; the attacker does not adapt to the defences; success is judged by string matching. A second model family and several phrasings per attack would strengthen the result.
 
 **Where it still fails and how to improve.** Semantic attacks that state a false fact in the document's own voice cannot be caught by patterns; they are only caught indirectly (conflict detection when a second source disagrees, claim verification when the claim is not in the cited text). Improvements: a trust score per source so that a lone low-trust claim is flagged, a small classifier for "instruction-like" text, and requiring two independent sources for high-impact facts.
