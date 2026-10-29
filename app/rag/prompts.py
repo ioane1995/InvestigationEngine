@@ -13,7 +13,7 @@ Rules:
 3. If evidence blocks state different values for the same fact, do NOT pick one: set status "conflicting_evidence", describe each position with its sources.
 4. If the evidence does not contain the answer (or only part of it), set status "insufficient_evidence", say what is missing, and do not guess or use outside knowledge.
    If only part is answerable, answer that part, cite it, and describe the missing part in missing_info.
-5. Never invent identifiers, numbers, dates, names or sources. Quote values exactly as they appear.
+5. Never invent identifiers, numbers, dates, names or sources. Quote values exactly as they appear (identifiers with a plain ASCII hyphen, e.g. INC-0012, dates in the same format as the source).
 6. You may call search_documents / get_document if the evidence is incomplete (at most a couple of times), then you MUST call submit_answer exactly once."""
 
 SUBMIT_PLAN = {"type": "function", "function": {

@@ -18,17 +18,30 @@ from app.stores.qdrant_store import QdrantStore
 log = logging.getLogger(__name__)
 
 
-def build_llm(s: Settings) -> LLM:
-    """Factory. Never crashes the app: a missing key or a malformed URL logs a clear ERROR and falls back to the offline reader."""
-    if s.llm_provider.lower() != "openai":
-        log.info("LLM: offline heuristic reader (LLM_PROVIDER=%s)", s.llm_provider)
+def build_llm(s: Settings, strict: bool = False) -> LLM:
+    """Factory. In the app (strict=False) a bad configuration never crashes start-up: it logs an ERROR and falls back to
+    the offline reader. In evaluation (strict=True) it raises instead, so a run can never silently use the wrong model."""
+    provider = s.llm_provider.lower()
+    if provider not in ("openai", "heuristic"):
+        msg = f"unknown LLM_PROVIDER {s.llm_provider!r}: use 'openai' (any OpenAI-compatible API, e.g. Groq) or 'heuristic'"
+        if strict:
+            raise ValueError(msg)
+        log.error("%s -> using the offline heuristic reader", msg)
+        return HeuristicLLM()
+    if provider == "heuristic":
+        log.info("LLM: offline heuristic reader")
         return HeuristicLLM()
     if not s.llm_api_key:
+        if strict:
+            raise ValueError("LLM_PROVIDER=openai but LLM_API_KEY is empty")
         log.error("LLM_PROVIDER=openai but LLM_API_KEY is empty -> using the offline heuristic reader")
         return HeuristicLLM()
     try:
-        llm = OpenAICompatLLM(s.llm_base_url, s.llm_api_key, s.llm_model, s.llm_timeout_s, s.llm_max_retries)
+        llm = OpenAICompatLLM(s.llm_base_url, s.llm_api_key, s.llm_model, s.llm_timeout_s, s.llm_max_retries,
+                              min_output_tokens=s.llm_min_output_tokens, reasoning_effort=s.llm_reasoning_effort, min_interval_s=s.llm_min_interval_s)
     except LLMConfigError as e:
+        if strict:
+            raise ValueError(str(e)) from e
         log.error("%s -> using the offline heuristic reader", e)
         return HeuristicLLM()
     log.info("LLM: base_url=%s model=%s api_key_set=yes", s.llm_base_url, s.llm_model)

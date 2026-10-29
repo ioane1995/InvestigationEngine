@@ -73,3 +73,10 @@ def test_embedder_mismatch_is_refused(tmp_path):
     build_container(s, load=False).store.client.close()
     with pytest.raises(StoreMismatch):
         build_container(make_settings(qdrant_path=str(tmp_path / "q"), embedding_dim=128), load=False)
+
+
+def test_embedding_store_id_override_is_explicit_and_logged(tmp_path):
+    from app.embeddings import build_embedder
+    e = build_embedder(make_settings(embedding_store_id="fastembed:BAAI/bge-small-en-v1.5"))
+    assert e.name == "fastembed:BAAI/bge-small-en-v1.5" and e.inner.name == "hashing-384"  # pinned identity differs from the real provider
+    assert build_embedder(make_settings()).name == "hashing-384"

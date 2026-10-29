@@ -8,3 +8,5 @@ data/*.jsonl
 eval/results/
 .pytest_cache/
 *.egg-info/
+
+data/corpus_50k/

@@ -49,3 +49,76 @@ def test_hotpot_conversion_and_unanswerable_removal():
     assert len(un) == 2 and all(q["expected_status"] == "insufficient_evidence" for q in un)
     assert all(q["gold_doc_ids"] and set(q["gold_doc_ids"]) <= ids for q in qs if q["type"] != "unanswerable")
     assert "wiki-shared" in ids  # shared paragraphs are de-duplicated into one document
+
+
+def test_retrieval_only_mode_never_calls_the_llm():
+    from app.rag.types import RagConfig
+    corp = generate(30, 60, seed=5)
+    c, _ = build_system(corp.docs, "structure")
+    c.engine.ask = lambda *a, **k: (_ for _ in ()).throw(AssertionError("LLM path must not run"))  # type: ignore[assignment]
+    res = run_config(c, corp.questions, standard_configs(False)[3], ask=False)
+    assert res["summary"]["retrieval_only"] and res["summary"]["recall@5"] > 0.3 and "correct" not in res["rows"][0]
+
+
+def test_degraded_answers_are_retried_not_silently_scored(monkeypatch):
+    import eval.runner as R
+    from app.rag.types import Answer
+    corp = generate(30, 60, seed=5)
+    c, _ = build_system(corp.docs, "structure")
+    real = c.engine.ask
+    state = {"n": 0}
+    def flaky(q, rag, ret, **k):
+        a = real(q, rag, ret)
+        state["n"] += 1
+        a.degraded = state["n"] % 2 == 1  # every first attempt "falls back"
+        return a
+    c.engine.ask = flaky  # type: ignore[assignment]
+    monkeypatch.setattr(R.time, "sleep", lambda s: None)
+    res = run_config(c, corp.questions[:6], standard_configs(False)[-1], retry_degraded=1)
+    assert res["summary"]["degraded_rate"] == 0.0 and state["n"] == 12
+    state["n"] = 0
+    res = run_config(c, corp.questions[:6], standard_configs(False)[-1], retry_degraded=0)
+    assert res["summary"]["degraded_rate"] == 0.5
+
+
+def test_resume_skips_finished_questions():
+    corp = generate(30, 60, seed=5)
+    c, _ = build_system(corp.docs, "structure")
+    cfg = standard_configs(False)[-1]
+    first = run_config(c, corp.questions[:5], cfg)
+    done = {r["id"]: r for r in first["rows"]}
+    calls = {"n": 0}
+    real = c.engine.ask
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+    c.engine.ask = counting  # type: ignore[assignment]
+    res = run_config(c, corp.questions[:8], cfg, done=done)
+    assert calls["n"] == 3 and len(res["rows"]) == 8
+
+
+def test_quota_exhaustion_stops_the_evaluation_and_sample_is_stratified():
+    import pytest
+    from eval.runner import QuotaExhausted, stratified_sample
+    corp = generate(40, 80, seed=5)
+    s = stratified_sample(corp.questions, 12)
+    assert {q["type"] for q in s} == {q["type"] for q in corp.questions} and 12 <= len(s) <= 16 and s == stratified_sample(corp.questions, 12)
+    c, _ = build_system(corp.docs, "structure")
+    from app.rag.types import Answer
+    c.engine.ask = lambda *a, **k: Answer("q", "insufficient_evidence", "x", degraded=True, warnings=["LLM unavailable (LLMQuotaExhausted: quota exhausted)"])  # type: ignore
+    with pytest.raises(QuotaExhausted):
+        run_config(c, corp.questions[:3], standard_configs(False)[-1], retry_degraded=2)
+
+
+def test_metric_v2_accepts_typographic_hyphens_and_equivalent_dates_but_stays_strict_otherwise():
+    from app.rag.types import Answer, Claim
+    q = {"expected_status": "answered", "gold_answers": ["CHG-0025", "2024-03-28", "Irakli Chkheidze"]}
+    a = Answer("q", "answered", "Caused by CHG\u20110025 on 28 March 2024, authored by Irakli\u00a0Chkheidze.", [Claim("x", ["E1"])])
+    assert M.answer_correct(q, a) and not M.answer_correct(q, a, strict=True)
+    wrong = Answer("q", "answered", "Caused by CHG-0026 on 28 March 2024, authored by Irakli Chkheidze.")
+    assert not M.answer_correct(q, wrong)
+    wrong_date = Answer("q", "answered", "CHG-0025, 29 March 2024, Irakli Chkheidze")
+    assert not M.answer_correct(q, wrong_date)
+    assert "March 5, 2024" in M.gold_variants("2024-03-05") and "5 March 2024" in M.gold_variants("2024-03-05")
+    unans = {"expected_status": "insufficient_evidence", "gold_answers": []}
+    assert not M.answer_correct(unans, a) and M.answer_correct(unans, Answer("q", "insufficient_evidence", "no"))

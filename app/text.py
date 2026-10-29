@@ -20,6 +20,17 @@ _ID_RE = re.compile(r"\b[A-Za-z]{2,6}-\d{2,6}\b")
 _SENT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[])|\n+")
 
 
+_DASHES = dict.fromkeys(map(ord, "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe63\uff0d"), "-")
+_SPACES = dict.fromkeys(map(ord, "\u00a0\u202f\u2009\u2007\u2008\u200a\u3000"), " ")
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00ad"), None)
+
+
+def normalize_typography(s: str) -> str:
+    """Map typographic dashes / non-breaking spaces to ASCII and drop zero-width characters.
+    LLMs often write 'CHG\u20110025' (non-breaking hyphen); without this identifiers silently stop matching."""
+    return s.translate({**_DASHES, **_SPACES, **_INVISIBLE})
+
+
 def stem(tok: str) -> str:
     """Very light suffix stripper (only for purely alphabetic tokens). Also drops a trailing 'e'
     so that cause / caused / causes / causing all map to the same stem."""

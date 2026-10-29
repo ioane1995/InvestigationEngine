@@ -24,13 +24,13 @@ from app.llm.heuristic import HeuristicLLM
 from app.models import Hit
 from app.rag import prompts
 from app.rag.conflicts import CandidateConflict, find_candidate_conflicts
-from app.rag.safety import looks_like_injection, neutralize
+from app.rag.safety import guard_output, neutralize, quarantine
 from app.rag.types import STATUSES, Answer, Citation, Claim, Conflict, ConflictPosition, RagConfig
 from app.rag.verify import verify_claims
 from app.retrieval.fusion import reciprocal_rank_fusion
 from app.retrieval.hybrid import HybridRetriever, RetrievalConfig
 from app.retrieval.rerank import assess_evidence, query_terms
-from app.text import identifiers
+from app.text import identifiers, normalize_typography
 
 log = logging.getLogger(__name__)
 _PHRASE_RE = re.compile(r"\b(?:[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})+)\b")
@@ -57,12 +57,13 @@ class EvidenceBook:
         blocks, flagged = [], []
         for e in eids:
             c = self.by_id[e].chunk
-            if looks_like_injection(c.text):
+            body, removed = quarantine(c.text)  # injected sentences never reach the model; the UI still shows the original
+            if removed:
                 flagged.append(e)
             sec = f' section="{neutralize(c.heading)[:120]}"' if c.heading else ""
             sec += f' via="{self.by_id[e].via}"' if self.by_id[e].via != "query" else ""
             blocks.append(f'<evidence id="{e}" doc_id="{neutralize(c.doc_id)}" title="{neutralize(c.title)[:120]}"{sec} '
-                          f'source="{neutralize(c.source)}">\n{neutralize(c.text)}\n</evidence>')
+                          f'source="{neutralize(c.source)}">\n{neutralize(body)}\n</evidence>')
         return "\n".join(blocks), flagged
 
 
@@ -115,7 +116,7 @@ class InvestigationEngine:
                 else:
                     warnings.append("planner returned no valid plan; using the original question")
             except LLMError as e:
-                warnings.append(f"planner unavailable ({type(e).__name__}); using the original question")
+                warnings.append(f"planner unavailable ({type(e).__name__}: {str(e)[:160]}); using the original question")
         timings["plan_ms"] = round((time.perf_counter() - t) * 1000, 1)
         emit("plan", sub_queries=sub_queries)
 
@@ -124,6 +125,8 @@ class InvestigationEngine:
         per_query: list[list[Hit]] = [self.retriever.search(q, rcfg) for q in sub_queries]
         merged = self._merge(per_query)
         main = merged[: cfg.evidence_k]
+        if any("dense_unavailable" in h.components for hs in per_query for h in hs):
+            warnings.append("semantic search unavailable (embedding service error); results use keyword search only")
         emit("retrieve", per_query=[{"query": q, "hits": [h.chunk.chunk_id for h in hs]} for q, hs in zip(sub_queries, per_query)])
 
         # 3 ---- hop expansion
@@ -214,7 +217,7 @@ class InvestigationEngine:
         eids = list(book.by_id)
         rendered, flagged = book.render(eids)
         if flagged:
-            warnings.append(f"possible prompt-injection text in evidence {flagged}; treated as data only")
+            warnings.append(f"possible prompt-injection text in evidence {flagged}; instruction-like sentences were removed from the model's view")
             emit("injection_flag", evidence_ids=flagged)
         user = f"<question>{neutralize(question)}</question>\n{rendered}"
         if conflicts:
@@ -308,10 +311,12 @@ class InvestigationEngine:
 
     def _finalize(self, question: str, a: dict[str, Any], book: EvidenceBook, cand: list[CandidateConflict],
                   warnings: list[str], degraded: bool) -> Answer:
-        claims = [Claim(str(c.get("text", "")), [str(e) for e in c.get("evidence_ids", []) if isinstance(e, str)])
+        nt = normalize_typography
+        a = {**a, "answer": nt(str(a.get("answer", ""))), "missing_info": nt(str(a.get("missing_info", "")))}
+        claims = [Claim(nt(str(c.get("text", ""))), [str(e) for e in c.get("evidence_ids", []) if isinstance(e, str)])
                   for c in a.get("claims", []) if isinstance(c, dict) and c.get("text")]
         verify_claims(claims, book.by_id)
-        conflicts = [Conflict(str(k.get("topic", "")), [ConflictPosition(str(p.get("claim", "")), [e for e in p.get("evidence_ids", []) if e in book.by_id])
+        conflicts = [Conflict(nt(str(k.get("topic", ""))), [ConflictPosition(nt(str(p.get("claim", ""))), [e for e in p.get("evidence_ids", []) if e in book.by_id])
                                                         for p in k.get("positions", []) if isinstance(p, dict)])
                      for k in a.get("conflicts", []) if isinstance(k, dict)]
         status = a["status"]
@@ -327,6 +332,11 @@ class InvestigationEngine:
             conflicts = [Conflict(f"{c.field} of {c.entity.upper()}", [ConflictPosition(f"{c.field} = {p.value}", p.evidence_ids) for p in c.positions])
                          for c in cand]
         answer_text = a["answer"].strip()
+        evidence_blob = "\n".join(f"{h.chunk.title}\n{h.chunk.text}" for h in book.by_id.values())
+        answer_text, guard_warnings = guard_output(answer_text, evidence_blob)
+        warnings.extend(guard_warnings)
+        for c in claims:
+            c.text, _ = guard_output(c.text, evidence_blob)
         if status == "insufficient_evidence" and a["status"] == "answered":
             answer_text = "The documents do not contain verifiable support for an answer."
         unsup = [c.text for c in claims if not c.supported]

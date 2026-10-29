@@ -1,5 +1,6 @@
-# Render blueprint (alternative to Hugging Face Spaces). Free web services sleep after ~15 min idle and have 512 MB RAM:
-# use the lighter embedder (EMBEDDING_PROVIDER=openai with a hosted embedding API) or HF Spaces (16 GB RAM) for the BM25 mirror of 50k+ docs.
+# Render blueprint. Free web services sleep after ~15 min idle and have 512 MB RAM, so query embeddings are served
+# by an API (same BGE model as the stored vectors) instead of a local ONNX model. Secrets use `sync: false`:
+# they are entered in the Render dashboard and never committed.
 services:
   - type: web
     name: ai-investigation-engine
@@ -15,4 +16,9 @@ services:
       - { key: LLM_BASE_URL, value: "https://api.groq.com/openai/v1" }
       - { key: LLM_MODEL, value: llama-3.3-70b-versatile }
       - { key: LLM_API_KEY, sync: false }
-      - { key: EMBEDDING_PROVIDER, value: fastembed }
+      - { key: EMBEDDING_PROVIDER, value: openai }
+      - { key: EMBEDDING_BASE_URL, value: "https://router.huggingface.co/hf-inference/v1" }
+      - { key: EMBEDDING_MODEL, value: BAAI/bge-small-en-v1.5 }
+      - { key: EMBEDDING_DIM, value: "384" }
+      - { key: EMBEDDING_STORE_ID, value: "fastembed:BAAI/bge-small-en-v1.5" }
+      - { key: EMBEDDING_API_KEY, sync: false }

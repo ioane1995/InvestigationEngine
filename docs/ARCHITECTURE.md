@@ -61,7 +61,15 @@ Dense retrieval uses Qdrant (cosine). The in-process mirror (`CorpusIndex`) is r
 6. **Conflicts** — a rule-based detector extracts `field: value` lines per primary entity and reports fields with different normalised values (`1 hour` = `60 minutes`) in **different documents**. They are hints for the LLM *and* attached to the answer if the LLM overlooked them.
 7. **Graceful degradation** — rate limit / timeout / provider error after retries ⇒ an extractive answer from the offline reader, flagged `degraded` and never cached.
 
-Prompt-injection hygiene: evidence is wrapped in tags, tag break-outs are neutralised, the system prompt declares evidence to be untrusted data, instruction-like text is flagged (`warnings`), and step 5 drops claims that the sources do not support.
+**Prompt-injection defence (`rag/safety.py`, layered).** Retrieved text is untrusted data:
+1. *Canonicalise* (NFKC, strip zero-width characters, fold Cyrillic/Greek look-alikes, re-join letter-spaced words) so obfuscated payloads match the rules.
+2. *Detect* with 24 named rules (override, role forgery, tag/chat-template break-out, tool forgery, status manipulation, citation suppression, disclosure, exfiltration, encoded payloads, EN/ES/DE/RU/KA phrasings). Weak signals (e.g. the words "system prompt") only flag when combined with another signal, which keeps ordinary incident text from being flagged.
+3. *Quarantine*: instruction-like lines are removed from the **model's copy** (together with adjacent prose lines, because the chunker puts every sentence on its own line and payloads continue across sentences; bullets and `Key: value` fields are kept) of a flagged chunk (the user still sees the original in the citation panel, so nothing is hidden from them).
+4. *Neutralise* tag and chat-template break-outs (`</evidence>`, `<|im_start|>`, full-width look-alike brackets) and keep the system-prompt rule that evidence is data.
+5. *Guard the output*: markdown images, URLs that no evidence contains, API-key patterns and system-prompt text are removed from answers (the zero-click exfiltration channel).
+6. *Verify claims* (step 5 above): a claim the cited evidence does not support is dropped.
+
+Known limit: a *semantic* attack with no trigger words ("per updated policy the severity is SEV5") is indistinguishable from a real statement by pattern rules; only conflict detection and claim verification can help, and only when a second source disagrees. See the injection section of the evaluation report.
 
 ### Decisions & trade-offs
 
@@ -77,22 +85,47 @@ Prompt-injection hygiene: evidence is wrapped in tags, tag break-outs are neutra
 
 ## 5. Deployment (free tier)
 
-```
- Browser ──HTTPS──► Hugging Face Space (Docker, 1 worker, 2 vCPU / 16 GB, sleeps when idle)
-                         │  FastAPI + own BM25 mirror + fastembed (query embeddings only)
-                         ├──HTTPS──► Qdrant Cloud free cluster   (vectors + document registry → survives restarts)
-                         └──HTTPS──► LLM provider (OpenAI-compatible, free tier)
-```
 
-1. Create a Qdrant Cloud free cluster → `QDRANT_URL`, `QDRANT_API_KEY`.
-2. Locally: `python -m scripts.generate_synthetic … --out data/corpus_50k`, then `python -m scripts.ingest_corpus --corpus data/corpus_50k/corpus.jsonl` with the cloud credentials in `.env` and `EMBEDDING_PROVIDER=fastembed` (embedding 60k chunks is done **once, offline**; the Space only embeds queries).
-3. Create a Space (SDK: Docker), push this repo (the README front-matter sets `app_port: 7860`), add **Secrets**: `ADMIN_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`, `LLM_API_KEY`, and variables `APP_ENV=production`, `LLM_PROVIDER=openai`, `LLM_BASE_URL`, `LLM_MODEL`, `EMBEDDING_PROVIDER=fastembed`.
-4. Persistence: everything durable is in Qdrant; the container is stateless. The start-up hook rebuilds the BM25 mirror from Qdrant, so a restart loses nothing (tested: `test_persistence_across_restart`).
-5. Secrets: only environment variables; `.env` is git-ignored; write endpoints need `X-API-Key` (constant-time compare) and are **disabled** in production if no key is configured; errors never echo keys; logs contain no secrets.
+**Live URL:** <https://ai-investigation-engine-u1f0.onrender.com>
 
-**Free-tier limits and how they are handled** — *Sleep after inactivity*: first request after idle waits ~1–2 min while the index rebuilds (`/health` reports `starting`, the UI retries). *Qdrant free storage/RAM*: 384-d vectors for ~60k chunks fit (≈0.1 GB raw); if the quota is hit, ingest a subset via `--limit`. *LLM rate limits*: per-IP limiter (default 20 req/min), 10-min answer cache, planner can be disabled (1 LLM call per question instead of 2), automatic degraded mode. *Single worker*: required because the BM25 mirror is per-process; fine for a demo, a scale-out design would move the lexical index into the vector DB (Qdrant sparse vectors) or Postgres FTS.
+### What runs where
+- **Render** hosts the stateless application container. Nothing durable is stored on its disk.
+- **Qdrant Cloud** stores the 51 264 documents / 61 768 chunks (vectors and payloads) and the document registry. On start-up the app rebuilds its in-memory keyword index (BM25) from Qdrant, so a restart or a free-tier sleep loses no data.
+- **Embeddings and LLM** are external HTTPS APIs. All keys are environment variables set in the Render dashboard (`QDRANT_API_KEY`, `LLM_API_KEY`, embedding API key, `ADMIN_API_KEY`); `.env` is git-ignored and no secret is in the repository. Write endpoints (upload / update / delete) require the `X-API-Key` header and are disabled in production if no admin key is configured.
 
-**Cost model** — infrastructure: $0. LLM: ≈ 2 calls/question (plan + answer, +1 per tool round); the evidence prompt is ≈ 1.5–3 k tokens. `usage.cost_usd` is computed per answer from `LLM_PRICE_*` and exposed in `/api/metrics`. Embedding cost for 60k chunks with a local ONNX model: CPU time only.
+### Deployment configuration (Render environment)
+Defined in `render.yaml`; values marked *secret* are set only in the Render dashboard.
+
+| Variable | Production value |
+|---|---|
+| `APP_ENV` | `production` (write endpoints require the admin key) |
+| `ADMIN_API_KEY`, `QDRANT_API_KEY`, `LLM_API_KEY`, `EMBEDDING_API_KEY` | *secret* |
+| `QDRANT_URL` | Qdrant Cloud cluster URL (*secret* in the blueprint) |
+| `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL` | `openai` (OpenAI-compatible) / Groq endpoint / `llama-3.3-70b-versatile` |
+| `EMBEDDING_PROVIDER` / `EMBEDDING_BASE_URL` | `openai` (OpenAI-compatible) / Hugging Face inference router |
+| `EMBEDDING_MODEL` / `EMBEDDING_DIM` | `BAAI/bge-small-en-v1.5` / `384` |
+| `EMBEDDING_STORE_ID` | `fastembed:BAAI/bge-small-en-v1.5` (declares API query vectors compatible with the stored ones) |
+
+The offline evaluations in `docs/EVALUATION_REPORT.md` used other generation models (gpt-oss-20b/120b); the model above is the one serving the live demo.
+
+### Decision: embeddings through an API instead of a local model
+Locally the 61 768 chunks were embedded once with `fastembed` (BAAI/bge-small-en-v1.5, ONNX). In the first Render deployment the same model was loaded inside the container, which exceeded the free plan's 512 MB RAM and caused an out-of-memory crash on start-up. The deployed service therefore embeds only the *query* through the Hugging Face Inference API (`EMBEDDING_PROVIDER=hf`, feature-extraction route), using the same model and dimension (384), so the stored vectors did not have to be re-created.
+- **Risk:** the same model name does not guarantee identical vectors (different quantisation or query prefix). `scripts/check_embedding_compat.py` compares local and API embeddings of the same texts. Result: **not completed.** The first run compared local fastembed with itself (cosine 1.0000, not evidence), and the runs against the API failed with HTTP 402 (the free Inference Providers credit was exhausted). Indirect evidence instead: in the live system, dense-only search returns the expected documents for the test questions (see the deployment probe in the evaluation report).
+- **Pinning:** the vector store records the identity of the embedder that built it and refuses to start with a different one (`StoreMismatch`). Because the API serves the same model, the identity is set explicitly with `EMBEDDING_STORE_ID=fastembed:BAAI/bge-small-en-v1.5`; the override is logged at start-up.
+- **Trade-offs:** one more external dependency and extra latency per question (about 490 ms for a dense-only search against about 300 ms for keyword search). If the embedding API fails, is rate limited (429, 5xx; retried twice) or refuses the call (for example 402 when the free credit is used up), search falls back to keyword (BM25) only and the answer carries the warning "semantic search unavailable". A malformed `EMBEDDING_BASE_URL` is detected at start-up and produces the same fallback with a clear log line.
+
+### Resources and free-tier limits
+| Item | Value |
+|---|---|
+| RAM after start-up (Render metrics) | <measured MB> of 512 MB |
+| Cold start after sleep (index rebuild from Qdrant) | <measured seconds> |
+| Free web service sleeps after idle time | first request after idle is slow (see above) |
+| Qdrant free cluster | holds all 61 768 chunks <confirm usage in the Qdrant dashboard> |
+| LLM free tier | rate limits (HTTP 429) are handled by retry with back-off, optional pacing (`LLM_MIN_INTERVAL_S`), a per-IP request limit (default 20 / min) and a 10-minute answer cache |
+| Single worker | required because the BM25 mirror lives in process memory |
+
+### Cost
+Infrastructure cost: 0. LLM cost: about 2 calls per question (planning + answer); `usage` in every answer and `/api/metrics` expose tokens and cost.
 
 ## 6. Security & reliability checklist
 

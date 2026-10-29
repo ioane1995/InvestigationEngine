@@ -95,3 +95,32 @@ def test_near_duplicate_hits_are_collapsed(container):
                                      RawDocument("x2", "Runbook A", base + " Revision 2.", "b.md", "md")])
     hits = container.retriever.search("restart payments instances health checks", RetrievalConfig(top_k=5))
     assert len(hits) == 1 and set(hits[0].doc_ids) == {"x1", "x2"}
+
+
+def test_search_falls_back_to_bm25_when_embedding_service_fails(loaded, monkeypatch):
+    from app.embeddings import EmbeddingError
+    def boom(text): raise EmbeddingError("embedding API unreachable")
+    monkeypatch.setattr(loaded.embedder.inner, "embed_query", boom)
+    for mode in ("hybrid", "dense"):
+        hits = loaded.retriever.search("Who authored CHG-0123?", RetrievalConfig(mode=mode, top_k=3))
+        assert hits and hits[0].chunk.doc_id == "chg-1" and "dense_unavailable" in hits[0].components
+    ans = loaded.engine.ask("What was the severity of INC-0012?")  # the whole pipeline keeps working, and says so
+    assert ans.status == "answered" and any("keyword search only" in w for w in ans.warnings)
+
+
+def test_embedding_api_client_retries_transient_errors():
+    import httpx, pytest
+    from app.embeddings import EmbeddingError, OpenAICompatEmbedder
+    calls = {"n": 0}
+    def h(req):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(503)
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [3.0, 4.0]}]})
+    sleeps = []
+    e = OpenAICompatEmbedder("http://x/v1", "k", "m", 2, client=httpx.Client(transport=httpx.MockTransport(h)), sleep=sleeps.append)
+    v = e.embed_query("hi")
+    assert calls["n"] == 3 and len(sleeps) == 2 and abs(float(v @ v) - 1.0) < 1e-6  # normalised
+    dead = OpenAICompatEmbedder("http://x/v1", "k", "m", 2, client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500))), sleep=lambda s: None)
+    with pytest.raises(EmbeddingError):
+        dead.embed_query("hi")

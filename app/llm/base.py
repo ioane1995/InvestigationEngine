@@ -14,6 +14,11 @@ class LLMRateLimited(LLMError):
     retryable = True
 
 
+class LLMQuotaExhausted(LLMError):
+    """The provider asks us to wait minutes/hours (daily or monthly quota). Retrying now is pointless."""
+    retryable = False
+
+
 class LLMTimeout(LLMError):
     retryable = True
 

@@ -43,6 +43,21 @@ def standard_configs(llm_is_real: bool) -> list[EvalConfig]:
     ]
 
 
+def stratified_sample(questions: list[dict[str, Any]], n: int, seed: int = 0) -> list[dict[str, Any]]:
+    """n questions, proportional to each question type (at least one per type), reproducible."""
+    import random
+    if n >= len(questions):
+        return questions
+    by: dict[str, list[dict]] = {}
+    for q in questions:
+        by.setdefault(q["type"], []).append(q)
+    rng, out = random.Random(seed), []
+    for t, qs in by.items():
+        k = max(1, round(n * len(qs) / len(questions)))
+        out += rng.sample(qs, min(k, len(qs)))
+    return sorted(out, key=lambda q: q["id"])
+
+
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
 
@@ -62,28 +77,55 @@ def build_system(docs: list[dict[str, Any]], chunking: str, embedder: Optional[E
     return c, {"ingest_s": round(time.perf_counter() - t, 2), "statuses": dict(st), "chunks": len(c.corpus.chunks), "chunking": chunking}
 
 
-def run_config(c: Container, questions: list[dict[str, Any]], cfg: EvalConfig, retrieval_k: int = 10) -> dict[str, Any]:
+class QuotaExhausted(RuntimeError):
+    """The LLM provider's quota is used up: stop the evaluation instead of scoring fallback answers."""
+
+
+def run_config(c: Container, questions: list[dict[str, Any]], cfg: EvalConfig, retrieval_k: int = 10, ask: bool = True, pause: float = 0.0,
+               retry_degraded: int = 0, done: Optional[dict[str, dict]] = None, on_row=None) -> dict[str, Any]:
+    """ask=False -> retrieval metrics only (no LLM, no rate limits). pause = seconds between questions.
+    retry_degraded = how often to re-ask a question whose answer fell back to the offline reader (LLM outage / 429),
+    so that fallback answers are never silently scored as if the real model had produced them."""
     rows: list[dict[str, Any]] = []
     for q in questions:
+        if done and q["id"] in done:
+            rows.append(done[q["id"]])
+            continue
         gold = q["gold_doc_ids"]
         t = time.perf_counter()
         hits = c.retriever.search(q["question"], RetrievalConfigK(cfg.retrieval, retrieval_k))
         ranked = M.hit_docs(hits)
-        ret_ms = (time.perf_counter() - t) * 1000
-        ans = c.engine.ask(q["question"], cfg.rag, cfg.retrieval)
-        ok = M.answer_correct(q, ans)
-        cp, cr = M.citation_scores(q, ans)
-        pipe_recall = M.recall_at_k([set(ans.evidence_doc_ids)], gold, 1)  # recall of everything the pipeline gathered
-        rows.append({
-            "id": q["id"], "type": q["type"], "question": q["question"], "expected": q["expected_status"], "got": ans.status,
-            "correct": ok, "failure": M.classify_failure(q, ans, ok), "answer": ans.answer[:300],
+        row: dict[str, Any] = {
+            "id": q["id"], "type": q["type"], "question": q["question"], "expected": q["expected_status"],
             "recall@1": M.recall_at_k(ranked, gold, 1), "recall@3": M.recall_at_k(ranked, gold, 3), "recall@5": M.recall_at_k(ranked, gold, 5),
             "recall@10": M.recall_at_k(ranked, gold, 10), "full_recall@5": M.full_recall_at_k(ranked, gold, 5), "mrr": M.reciprocal_rank(ranked, gold),
-            "ndcg@10": M.ndcg_at_k(ranked, gold, 10), "evidence_recall": pipe_recall, "cite_precision": cp, "cite_recall": cr,
-            "faithfulness": M.faithfulness(ans), "retrieval_ms": ret_ms, "total_ms": ans.timings_ms.get("total_ms", 0.0),
-            "llm_calls": ans.usage.get("llm_calls", 0), "tokens": ans.usage.get("prompt_tokens", 0) + ans.usage.get("completion_tokens", 0),
-            "cost_usd": ans.usage.get("cost_usd", 0.0), "degraded": ans.degraded,
-        })
+            "ndcg@10": M.ndcg_at_k(ranked, gold, 10), "retrieval_ms": (time.perf_counter() - t) * 1000}
+        if ask:
+            ans = c.engine.ask(q["question"], cfg.rag, cfg.retrieval)
+            if any("LLMQuotaExhausted" in w for w in ans.warnings):
+                raise QuotaExhausted(next(w for w in ans.warnings if "LLMQuotaExhausted" in w))
+            tries = 0
+            while ans.degraded and tries < retry_degraded:
+                tries += 1
+                time.sleep(max(pause, 15.0) * tries)  # cool down, then try the real model again
+                ans = c.engine.ask(q["question"], cfg.rag, cfg.retrieval)
+                if any("LLMQuotaExhausted" in w for w in ans.warnings):
+                    raise QuotaExhausted(next(w for w in ans.warnings if "LLMQuotaExhausted" in w))
+            ok = M.answer_correct(q, ans)
+            strict_ok = M.answer_correct(q, ans, strict=True)
+            cp, cr = M.citation_scores(q, ans)
+            row.update({
+                "got": ans.status, "correct": ok, "correct_strict": strict_ok, "failure": M.classify_failure(q, ans, ok), "answer": ans.answer[:1500],
+                "claims_text": " | ".join(c.text for c in ans.claims)[:3000],
+                "evidence_recall": M.recall_at_k([set(ans.evidence_doc_ids)], gold, 1), "cite_precision": cp, "cite_recall": cr,
+                "faithfulness": M.faithfulness(ans), "total_ms": ans.timings_ms.get("total_ms", 0.0), "llm_calls": ans.usage.get("llm_calls", 0),
+                "tokens": ans.usage.get("prompt_tokens", 0) + ans.usage.get("completion_tokens", 0), "cost_usd": ans.usage.get("cost_usd", 0.0),
+                "degraded": ans.degraded})
+            if pause > 0:
+                time.sleep(pause)
+        rows.append(row)
+        if on_row:
+            on_row(cfg, row)
     return {"config": cfg.name, "description": cfg.description, "chunking": cfg.chunking, "rows": rows, "summary": summarize(rows)}
 
 
@@ -93,6 +135,12 @@ def RetrievalConfigK(cfg: RetrievalConfig, k: int) -> RetrievalConfig:
 
 
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    f0 = lambda x: round(x, 3) if isinstance(x, float) and not math.isnan(x) else None  # noqa: E731
+    if rows and "correct" not in rows[0]:  # retrieval-only run
+        return {"n_questions": len(rows), "retrieval_only": True, **{k: f0(M.mean(r[k] for r in rows)) for k in
+                ("recall@1", "recall@3", "recall@5", "recall@10", "full_recall@5", "mrr", "ndcg@10")},
+                "retrieval_p50_ms": f0(M.percentile([r["retrieval_ms"] for r in rows], 0.5)),
+                "retrieval_p95_ms": f0(M.percentile([r["retrieval_ms"] for r in rows], 0.95))}
     ans_rows = [r for r in rows if r["type"] != "unanswerable"]
     un = [r for r in rows if r["type"] == "unanswerable"]
     cf = [r for r in rows if r["type"] == "conflict"]
@@ -113,6 +161,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "full_recall@5": f(M.mean(r["full_recall@5"] for r in rows)), "mrr": f(M.mean(r["mrr"] for r in rows)), "ndcg@10": f(M.mean(r["ndcg@10"] for r in rows)),
         "evidence_recall": f(M.mean(r["evidence_recall"] for r in rows)),
         "answer_correctness": f(M.mean(float(r["correct"]) for r in rows)),
+        "answer_correctness_strict": f(M.mean(float(r.get("correct_strict", r["correct"])) for r in rows)),
         "answer_correctness_answerable": f(M.mean(float(r["correct"]) for r in ans_rows if r["expected"] == "answered")),
         "abstention_recall": f(M.mean(float(r["got"] == "insufficient_evidence") for r in un)),
         "abstention_precision": f((sum(1 for r in pred_abstain if r["type"] == "unanswerable") / len(pred_abstain)) if pred_abstain else math.nan),
@@ -122,5 +171,6 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "latency_p50_ms": f(M.percentile([r["total_ms"] for r in rows], 0.5)), "latency_p95_ms": f(M.percentile([r["total_ms"] for r in rows], 0.95)),
         "retrieval_p50_ms": f(M.percentile([r["retrieval_ms"] for r in rows], 0.5)),
         "avg_llm_calls": f(M.mean(float(r["llm_calls"]) for r in rows)), "avg_tokens": f(M.mean(float(r["tokens"]) for r in rows)),
+        "degraded_rate": f(M.mean(float(r["degraded"]) for r in rows)),
         "total_cost_usd": round(sum(r["cost_usd"] for r in rows), 5), "by_type": by_type, "failures": dict(failures),
     }
