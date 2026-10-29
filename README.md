@@ -11,7 +11,7 @@ rebuilt from Qdrant Cloud (about 76 s to load 61 768 chunks). Wait for the page 
 **Corpus in the live system:** 51 264 unique documents (61 768 chunks) of a synthetic incident-investigation dataset, reproducible with
 `python -m scripts.generate_synthetic --incidents 3200 --filler 38800 --seed 21`.
 
-**Try these questions** (gold answers are in `eval/questions/scale_50k_seed21.jsonl`):
+**Try these questions** (answers are in `eval/questions/scale_50k_seed21.jsonl`):
 
 - Who authored change CHG-16378? *(single document)*
 - Which team owns the service that was modified by the root cause change of INC-2622? *(multi-hop: incident → change → service catalogue)*
@@ -76,7 +76,7 @@ Without an LLM key the app still works in a clearly labelled degraded, extractiv
   `python -m scripts.generate_synthetic --incidents 3200 --filler 38800 --seed 21 --out data/corpus_50k`.
   Changes → incidents → services, with incident reports, post-mortems, change records, a service catalogue, alert logs, runbooks and digests,
   plus *injected* exact duplicates, near duplicates, contradicting report/post-mortem pairs, missing post-mortems and never-recorded attributes.
-  It is seeded, so it is byte-identical on every run, and every question carries exact gold documents and answers. It mirrors the task's own
+  It is seeded, so it is byte-identical on every run, and every question carries exact documents and answers. It mirrors the task's own
   example (payment-processing delays).
 - **HotpotQA (optional, real multi-hop data).** `python -m scripts.prepare_hotpotqa --n-questions 6000` (needs internet and `pip install datasets`),
   then `python -m eval.run_eval --corpus data/corpus_hotpot`. Supporting paragraphs of some questions are removed so that abstaining is correct.
@@ -92,7 +92,7 @@ python -m eval.tables eval/results/real_20b.json eval/results/real_120b.json
 ```
 
 54 questions per corpus (simple, multi-hop, natural-language multi-hop, unanswerable, conflicting), 7 retrieval/pipeline configurations,
-2 chunking strategies, 2 embedders and 2 LLMs. The question sets with gold documents and answers are committed in `eval/questions/`.
+2 chunking strategies, 2 embedders and 2 LLMs. The question sets with documents and answers are committed in `eval/questions/`.
 Metrics: Recall@1/5/10, MRR, evidence recall, answer correctness, abstention recall/precision,
 conflict-detection recall, citation precision/recall, faithfulness, latency and LLM calls. Full methodology, results and error analysis:
 [docs/EVALUATION_REPORT.md](docs/EVALUATION_REPORT.md).
