@@ -23,11 +23,15 @@ class Settings(BaseSettings):
     collection_prefix: str = "ie"
 
     # ---- embeddings ----
-    embedding_provider: str = "hashing"  # hashing | fastembed | openai
+    embedding_provider: str = "hashing"  # hashing | fastembed | openai (OpenAI-shaped API) | hf (Hugging Face feature-extraction)
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 384
     embedding_base_url: Optional[str] = None
     embedding_api_key: Optional[str] = None
+    # Identity pinned in the vector store. Set it ONLY when a different provider serves the very same model the
+    # collection was built with (e.g. 'fastembed:BAAI/bge-small-en-v1.5' served through an API) and you have verified
+    # compatibility with scripts/check_embedding_compat.py.
+    embedding_store_id: Optional[str] = None
 
     # ---- LLM ----
     llm_provider: str = "heuristic"  # heuristic | openai (OpenAI-compatible)
@@ -36,6 +40,9 @@ class Settings(BaseSettings):
     llm_model: str = "llama-3.3-70b-versatile"
     llm_timeout_s: float = 45.0
     llm_max_retries: int = 3
+    llm_min_interval_s: float = 0.0  # minimum seconds between LLM calls (set 2-6 on strict free tiers)
+    llm_min_output_tokens: int = 2048  # headroom for reasoning models (gpt-oss, qwen3...) whose hidden thinking counts against max_tokens
+    llm_reasoning_effort: Optional[str] = None  # e.g. 'low' for gpt-oss on Groq; empty = parameter is not sent
     llm_price_in_per_m: float = 0.0
     llm_price_out_per_m: float = 0.0
 

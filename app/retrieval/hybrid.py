@@ -6,7 +6,9 @@ import threading
 from dataclasses import dataclass, field, replace
 from typing import Iterable, Optional
 
-from app.embeddings import Embedder
+import logging
+
+from app.embeddings import Embedder, EmbeddingError
 from app.models import Chunk, Hit
 from app.retrieval.bm25 import BM25Index
 from app.retrieval.fusion import reciprocal_rank_fusion, weighted_score_fusion
@@ -66,8 +68,16 @@ class HybridRetriever:
         ck = cfg.candidate_k
         dense: list[tuple[str, float]] = []
         lex: list[tuple[str, float]] = []
+        dense_failed = False
         if cfg.mode in ("hybrid", "dense"):
-            dense = [(c, s) for c, s in self.store.dense_search(self.embedder.embed_query(query), ck, filters)]
+            try:
+                dense = [(c, s) for c, s in self.store.dense_search(self.embedder.embed_query(query), ck, filters)]
+            except Exception as e:  # embedding API down / rate limited / vector DB error: keep serving with keyword search only
+                logging.getLogger(__name__).warning("dense retrieval unavailable, falling back to BM25 only: %s: %s", type(e).__name__, e,
+                                                    exc_info=not isinstance(e, EmbeddingError))
+                dense_failed = True
+                if cfg.mode == "dense":
+                    cfg = replace(cfg, mode="bm25")
         if cfg.mode in ("hybrid", "bm25"):
             lex = self.corpus.bm25.search(query, ck, filters)
 
@@ -92,6 +102,8 @@ class HybridRetriever:
                 comp.update(dense_rank=d_rank[cid], dense_score=round(dict(dense)[cid], 4))
             if cid in l_rank:
                 comp.update(bm25_rank=l_rank[cid], bm25_score=round(dict(lex)[cid], 4))
+            if dense_failed:
+                comp["dense_unavailable"] = 1.0
             hits.append(Hit(chunk=chunk, score=sc, components=comp))
 
         if cfg.collapse_near_dups:

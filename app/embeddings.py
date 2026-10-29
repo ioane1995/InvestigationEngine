@@ -6,10 +6,13 @@
                       It captures lexical/sub-word similarity, NOT true semantics.
 * FastEmbedEmbedder - real neural embeddings via ONNX (default BAAI/bge-small-en-v1.5, 384-d), CPU only.
 * OpenAICompatEmbedder - any /v1/embeddings compatible HTTP API.
+* HFInferenceEmbedder  - Hugging Face Inference Providers feature-extraction route (raw list-of-vectors response).
 """
 from __future__ import annotations
 
 import logging
+import re
+import time
 import zlib
 from collections import OrderedDict
 from typing import Protocol
@@ -93,21 +96,70 @@ class FastEmbedEmbedder:
 
 
 class OpenAICompatEmbedder:
-    def __init__(self, base_url: str, api_key: str | None, model: str, dim: int, timeout: float = 30.0):
-        self.url = base_url.rstrip("/") + "/embeddings"
+    """Any ``POST {base_url}/embeddings`` API with the OpenAI response shape ({"data": [{"index", "embedding"}]})."""
+
+    def __init__(self, base_url: str, api_key: str | None, model: str, dim: int, timeout: float = 30.0,
+                 client: httpx.Client | None = None, sleep=time.sleep, max_retries: int = 2):
+        base_url = (base_url or "").strip()
+        # a malformed base URL (empty scheme, Markdown link pasted from a chat, stray quotes/brackets) must surface as a clear
+        # embedding error on every call -> keyword-only fallback + readable log line, never an unhandled exception
+        self._config_error = None if re.fullmatch(r"https?://[^\s\[\]()<>\"']+", base_url) else (
+            f"EMBEDDING_BASE_URL is not a plain http(s) URL: {base_url[:60]!r} (no brackets, quotes or Markdown link syntax)")
+        if self._config_error:
+            log.error(self._config_error)
+        self.url = self._url(base_url.rstrip("/"), model)
         self.headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        # Match the stored Qdrant name string to bypass the strict mismatch check
-        self.model, self.dim, self.name = model, dim, f"fastembed:{model}"
-        self.client = httpx.Client(timeout=timeout)
-        
+        self.model, self.dim, self.name = model, dim, self._name(model)
+        self.client = client or httpx.Client(timeout=timeout)
+        self._sleep, self.max_retries = sleep, max_retries
+
+    # -- the three things that differ between providers
+    @staticmethod
+    def _url(base: str, model: str) -> str:
+        return base + "/embeddings"
+
+    @staticmethod
+    def _name(model: str) -> str:
+        return f"openai:{model}"
+
+    def _payload(self, texts: list[str]) -> dict:
+        return {"model": self.model, "input": texts}
+
+    @staticmethod
+    def _parse(body) -> list:
+        return [d["embedding"] for d in sorted(body["data"], key=lambda d: d["index"])]
+
     def _call(self, texts: list[str]) -> np.ndarray:
-        try:
-            r = self.client.post(self.url, headers=self.headers, json={"model": self.model, "input": texts})
-            r.raise_for_status()
-            data = sorted(r.json()["data"], key=lambda d: d["index"])
-        except (httpx.HTTPError, KeyError, ValueError) as e:
-            raise EmbeddingError(f"embedding API failed: {e}") from e
-        return _l2(np.asarray([d["embedding"] for d in data], dtype=np.float32))
+        if self._config_error:
+            raise EmbeddingError(self._config_error)
+        last: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                r = self.client.post(self.url, headers=self.headers, json=self._payload(texts))
+                if r.status_code == 429 or r.status_code >= 500:  # transient: back off and retry
+                    last = EmbeddingError(f"embedding API returned {r.status_code}")
+                    if attempt < self.max_retries:
+                        self._sleep(0.5 * 3 ** attempt)
+                        continue
+                    raise last
+                r.raise_for_status()
+                arr = np.asarray(self._parse(r.json()), dtype=np.float32)
+                if arr.ndim == 1 and len(texts) == 1:
+                    arr = arr[None, :]
+                if arr.shape != (len(texts), self.dim):  # wrong model / dimension / token-level output: never feed it to the vector DB
+                    raise EmbeddingError(f"embedding API returned shape {tuple(arr.shape)}, expected ({len(texts)}, {self.dim})")
+                return _l2(arr)
+            except EmbeddingError:
+                raise
+            except (httpx.TransportError, httpx.TimeoutException) as e:
+                last = e
+                if attempt < self.max_retries:
+                    self._sleep(0.5 * 3 ** attempt)
+                    continue
+            except (httpx.HTTPError, httpx.InvalidURL, KeyError, ValueError, TypeError, IndexError, AttributeError) as e:
+                # any malformed / unexpected response is an *embedding* failure, so callers can degrade to keyword search
+                raise EmbeddingError(f"embedding API failed: {type(e).__name__}: {e}") from e
+        raise EmbeddingError(f"embedding API unreachable after retries: {last}")
 
     def embed_documents(self, texts: list[str]) -> np.ndarray:
         parts = [self._call(texts[i : i + 64]) for i in range(0, len(texts), 64)]
@@ -115,6 +167,29 @@ class OpenAICompatEmbedder:
 
     def embed_query(self, text: str) -> np.ndarray:
         return self._call([text])[0]
+
+
+class HFInferenceEmbedder(OpenAICompatEmbedder):
+    """Hugging Face Inference Providers, feature-extraction route (NOT the OpenAI shape):
+    ``POST {base_url}/models/{model}`` with ``{"inputs": [...]}`` returns ``[[... dim floats ...], ...]``.
+    Use EMBEDDING_PROVIDER=hf and EMBEDDING_BASE_URL=https://router.huggingface.co/hf-inference (no /v1)."""
+
+    @staticmethod
+    def _url(base: str, model: str) -> str:
+        return f"{base}/models/{model}"
+
+    @staticmethod
+    def _name(model: str) -> str:
+        return f"hf:{model}"
+
+    def _payload(self, texts: list[str]) -> dict:
+        return {"inputs": texts}
+
+    @staticmethod
+    def _parse(body) -> list:
+        if isinstance(body, dict):  # e.g. {"error": "Model ... is currently loading"}
+            raise EmbeddingError(f"embedding API error: {str(body.get('error', body))[:200]}")
+        return body
 
 
 class CachedQueryEmbedder:
@@ -148,11 +223,16 @@ def build_embedder(s: Settings) -> Embedder:
         e: Embedder = HashingEmbedder(s.embedding_dim)
     elif p == "fastembed":
         e = FastEmbedEmbedder(s.embedding_model, s.embedding_dim)
-    elif p == "openai":
+    elif p in ("openai", "hf"):
         if not s.embedding_base_url:
-            raise EmbeddingError("EMBEDDING_BASE_URL is required for the openai provider")
-        e = OpenAICompatEmbedder(s.embedding_base_url, s.embedding_api_key, s.embedding_model, s.embedding_dim)
+            raise EmbeddingError(f"EMBEDDING_BASE_URL is required for the {p} provider")
+        cls = HFInferenceEmbedder if p == "hf" else OpenAICompatEmbedder
+        e = cls(s.embedding_base_url, s.embedding_api_key, s.embedding_model, s.embedding_dim)
     else:
         raise EmbeddingError(f"unknown EMBEDDING_PROVIDER '{s.embedding_provider}'")
-    log.info("embedder ready: %s (dim=%d)", e.name, e.dim)
-    return CachedQueryEmbedder(e)
+    cached = CachedQueryEmbedder(e)
+    if s.embedding_store_id:
+        log.warning("EMBEDDING_STORE_ID override: vectors are served by %s but pinned as %s", e.name, s.embedding_store_id)
+        cached.name = s.embedding_store_id
+    log.info("embedder ready: %s (dim=%d)", cached.name, e.dim)
+    return cached
